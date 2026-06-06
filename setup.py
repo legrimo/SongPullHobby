@@ -8,13 +8,11 @@ setup(
     packages=["songpull_hobby"],
     python_requires=">=3.9",
     install_requires=[
-        "imageio-ffmpeg",
         "python-dotenv>=1.0.1",
         "requests>=2.32.3",
         "rich>=13.7.1",
         "typer>=0.12.5",
         "urllib3<2",
-        "yt-dlp",
     ],
     entry_points={"console_scripts": ["songpull-hobby=songpull_hobby.cli:app"]},
 )

@@ -1,7 +1,6 @@
 .env
 .songpull-hobby/
 .venv/
-songpull-hobby-mp3s/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -10,4 +9,3 @@ dist/
 build/
 *.egg-info/
 .songpull/
-songpull-mp3s/

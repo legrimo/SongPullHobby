@@ -1,10 +1,6 @@
 from __future__ import annotations
 
 import csv
-import re
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -53,37 +49,6 @@ def youtube_client() -> Optional[YouTubeClient]:
     if not settings.youtube_api_key:
         return None
     return YouTubeClient(settings.youtube_api_key)
-
-
-def executable_path(name: str) -> Optional[str]:
-    path = shutil.which(name)
-    if path:
-        return path
-
-    venv_candidate = Path(sys.executable).with_name(name)
-    if venv_candidate.exists():
-        return str(venv_candidate)
-
-    return None
-
-
-def ffmpeg_path() -> str:
-    path = executable_path("ffmpeg")
-    if path:
-        return path
-
-    try:
-        import imageio_ffmpeg
-    except ImportError:
-        fail("`ffmpeg` is required. Install it with `brew install ffmpeg`.")
-
-    return imageio_ffmpeg.get_ffmpeg_exe()
-
-
-def safe_path_name(value: str, max_length: int = 120) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", value)
-    cleaned = " ".join(cleaned.split()).strip(" .")
-    return (cleaned[:max_length].rstrip(" .") or "untitled")
 
 
 @app.command()
@@ -300,74 +265,6 @@ def show(
         )
 
     console.print(table)
-
-
-@app.command("download-mp3s")
-def download_mp3s(
-    playlist: str = typer.Argument(..., help="Playlist name or Spotify playlist ID."),
-    output_root: Path = typer.Option(
-        Path("songpull-hobby-mp3s"), help="Directory where playlist MP3 folders are written."
-    ),
-) -> None:
-    """Download saved YouTube matches for a playlist as MP3 files."""
-    yt_dlp = executable_path("yt-dlp")
-    if not yt_dlp:
-        fail("`yt-dlp` is required. Install it with `brew install yt-dlp`.")
-    ffmpeg = ffmpeg_path()
-
-    rows = database().playlist_rows_with_youtube(playlist)
-    if not rows:
-        fail("No saved YouTube links found for that playlist. Run `songpull-hobby sync` first.")
-
-    playlist_name = str(rows[0]["playlist_name"])
-    playlist_dir = output_root / safe_path_name(playlist_name)
-    if playlist_dir.exists():
-        shutil.rmtree(playlist_dir)
-    playlist_dir.mkdir(parents=True, exist_ok=True)
-
-    position_width = max(2, len(str(max(row["position"] for row in rows))))
-    downloaded = 0
-    failed = 0
-
-    for row in rows:
-        stem = safe_path_name(
-            f"{row['position']:0{position_width}d} - {row['artists']} - {row['name']}"
-        )
-        output_template = str(playlist_dir / f"{stem}.%(ext)s")
-        console.print(f"Downloading {row['position']}. {row['name']}...")
-        result = subprocess.run(
-            [
-                yt_dlp,
-                "--extract-audio",
-                "--audio-format",
-                "mp3",
-                "--audio-quality",
-                "0",
-                "--ffmpeg-location",
-                ffmpeg,
-                "--extractor-args",
-                "youtube:player_client=android",
-                "--no-playlist",
-                "--output",
-                output_template,
-                row["youtube_url"],
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            downloaded += 1
-        else:
-            failed += 1
-            console.print(f"[red]Failed:[/red] {row['name']}")
-            if result.stderr:
-                console.print(result.stderr.strip())
-
-    console.print(
-        f"[green]Downloaded {downloaded} MP3 files to {playlist_dir}.[/green]"
-    )
-    if failed:
-        fail(f"{failed} download(s) failed.")
 
 
 @app.command()
