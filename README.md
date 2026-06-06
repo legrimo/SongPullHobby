@@ -1,9 +1,10 @@
 # SongPullHobby
 
 SongPullHobby is a local CLI for playlist metadata workflows. It syncs Spotify
-playlist metadata, searches YouTube for candidate reference links, and stores
-the results in a local SQLite cache so repeated runs can avoid duplicate API
-lookups.
+playlist metadata, searches YouTube for candidate reference links, and keeps a
+local SQLite cache to reduce duplicate API lookups across runs. Cached API data
+should be refreshed or deleted periodically in line with Spotify Developer Terms
+and YouTube API Services policies.
 
 SongPullHobby does not download, copy, or store audio or video content. It is
 intended for personal metadata review and CSV export only.
