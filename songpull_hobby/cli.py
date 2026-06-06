@@ -34,7 +34,11 @@ def database() -> SongPullHobbyDB:
 def spotify_client() -> SpotifyClient:
     settings = load_settings()
     if not settings.spotify_client_id or not settings.spotify_client_secret:
-        fail("Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in .env first.")
+        fail(
+            "Missing Spotify credentials. Run `cp .env.example .env`, then set "
+            "SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in .env. See README.md "
+            "for the Spotify Developer Dashboard setup steps."
+        )
 
     return SpotifyClient(
         client_id=settings.spotify_client_id,
@@ -60,6 +64,7 @@ def setup() -> None:
     except SpotifyError as exc:
         fail(str(exc))
     console.print("[green]Spotify setup complete.[/green]")
+    console.print("Next: run `songpull-hobby get-playlists --limit 5`.")
 
 
 @app.command()
