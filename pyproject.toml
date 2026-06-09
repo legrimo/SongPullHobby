@@ -16,8 +16,16 @@ dependencies = [
     "urllib3<2",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+]
+
 [project.scripts]
 songpull-hobby = "songpull_hobby.cli:app"
 
 [tool.setuptools]
 packages = ["songpull_hobby"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

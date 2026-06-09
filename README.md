@@ -32,6 +32,13 @@ pip install -e .
 cp .env.example .env
 ```
 
+For development, install and run the test suite with:
+
+```bash
+pip install -e ".[test]"
+python -m pytest
+```
+
 After `.env` is filled in, authorize Spotify and try the CLI:
 
 ```bash
@@ -46,6 +53,9 @@ songpull-hobby sync "https://open.spotify.com/playlist/3zO9BEXAMPLE1234567890" -
 
 # Shows the saved local table for that playlist.
 songpull-hobby show "https://open.spotify.com/playlist/3zO9BEXAMPLE1234567890"
+
+# Manually replace one saved reference link after reviewing a track.
+songpull-hobby set-source "My top tracks playlist" 12 "https://www.youtube.com/watch?v=VIDEO_ID"
 
 # Exports the saved table when you want to review it in a spreadsheet.
 songpull-hobby export exports/my-top-tracks.csv
@@ -130,7 +140,7 @@ Authorized Spotify user: Leo Mont
 ```
 
 `sync` fetches playlist tracks, stores them locally, and fills in missing
-YouTube links when a key is configured:
+YouTube reference links when a key is configured:
 
 ```bash
 # Sync an example Spotify playlist into the local library.
@@ -151,7 +161,7 @@ songpull-hobby show "My top tracks playlist"
 ```text
                               SongPullHobby Library
 ┏━━━┳━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ # ┃ Song               ┃ Artist            ┃ YouTube Link                         ┃ Match                      ┃
+┃ # ┃ Song               ┃ Artist            ┃ Link                                 ┃ Source Title              ┃
 ┡━━━╇━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
 │ 1 │ Midnight City      │ M83               │ https://www.youtube.com/watch?v=...  │ M83 - Midnight City        │
 │ 2 │ Sweet Disposition  │ The Temper Trap   │ https://www.youtube.com/watch?v=...  │ Sweet Disposition - Audio  │
@@ -180,8 +190,17 @@ songpull-hobby sync "https://open.spotify.com/playlist/PLAYLIST_ID" --refresh-yo
 # Show saved tracks and links.
 songpull-hobby show "https://open.spotify.com/playlist/PLAYLIST_ID"
 
+# Manually replace the saved YouTube reference link for one track.
+songpull-hobby set-source "My top tracks playlist" 12 "https://www.youtube.com/watch?v=VIDEO_ID"
+
+# Retrieve the saved link, match title, and score for one track.
+songpull-hobby get-link "My top tracks playlist" 12
+
 # Export the saved table to CSV.
 songpull-hobby export exports/playlist.csv
+
+# Export manually selected reference matches for analysis.
+songpull-hobby export-manual-matches exports/manual-matches.jsonl
 
 # Print safe Spotify auth diagnostics for troubleshooting.
 songpull-hobby debug-spotify "https://open.spotify.com/playlist/PLAYLIST_ID"
@@ -192,7 +211,7 @@ songpull-hobby debug-spotify "https://open.spotify.com/playlist/PLAYLIST_ID"
 SongPullHobby stores local state under `.songpull-hobby/` by default:
 
 - `.songpull-hobby/songpull-hobby.db` stores synced playlists, tracks, saved
-  YouTube matches, and sync run history.
+  source reference metadata, manual selection markers, and sync run history.
 - `.songpull-hobby/spotify_token.json` stores the Spotify OAuth token generated
   by `songpull-hobby setup`.
 
@@ -227,5 +246,7 @@ and [YouTube API Services Terms](https://developers.google.com/youtube/terms/api
   and [Google API key best practices](https://cloud.google.com/docs/authentication/api-keys).
 - Restrict your Google API key to the YouTube Data API and to the narrowest
   application context practical for your usage.
-- The first matching version is intentionally simple and can be improved with
-  duration comparison or manual match correction commands later.
+- Matching considers title, artist, official metadata signals, duration, and
+  popularity metadata returned by the YouTube Data API.
+- Manual source corrections are validated through the YouTube Data API and store
+  only reference metadata.

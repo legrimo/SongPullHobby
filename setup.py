@@ -14,5 +14,6 @@ setup(
         "typer>=0.12.5",
         "urllib3<2",
     ],
+    extras_require={"test": ["pytest>=8.0"]},
     entry_points={"console_scripts": ["songpull-hobby=songpull_hobby.cli:app"]},
 )

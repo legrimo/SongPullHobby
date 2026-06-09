@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -9,7 +10,7 @@ from rich.console import Console
 from rich.table import Table
 
 from songpull_hobby.config import ensure_data_dir, load_settings
-from songpull_hobby.db import SongPullHobbyDB
+from songpull_hobby.db import SongPullHobbyDB, Source
 from songpull_hobby.spotify import SpotifyClient, SpotifyError, extract_playlist_id
 from songpull_hobby.youtube import YouTubeClient, YouTubeError
 
@@ -53,6 +54,101 @@ def youtube_client() -> Optional[YouTubeClient]:
     if not settings.youtube_api_key:
         return None
     return YouTubeClient(settings.youtube_api_key)
+
+
+def require_youtube_client() -> YouTubeClient:
+    youtube = youtube_client()
+    if not youtube:
+        fail("Set YOUTUBE_API_KEY in .env first so the YouTube Data API can validate links.")
+    return youtube
+
+
+def format_score(value: Optional[float]) -> str:
+    if value is None:
+        return ""
+    return f"{value:.2f}"
+
+
+def resolve_saved_playlist(db: SongPullHobbyDB, playlist: str) -> str:
+    playlist_id = db.resolve_playlist_id(playlist)
+    if not playlist_id:
+        fail(
+            "Could not find a saved playlist with that name or ID. "
+            "Run `songpull-hobby sync` first."
+        )
+    return playlist_id
+
+
+def resolve_saved_track(db: SongPullHobbyDB, playlist_id: str, track: str):
+    row = db.resolve_playlist_track(playlist_id, track)
+    if not row:
+        fail(
+            "Could not find a unique saved track by that position, Spotify track ID, "
+            "or exact track name."
+        )
+    return row
+
+
+def source_from_match(playlist_id: str, match) -> Source:
+    return Source(
+        playlist_id=playlist_id,
+        spotify_track_id=match.spotify_track_id,
+        provider="youtube",
+        source_url=match.youtube_url,
+        source_id=match.youtube_video_id,
+        source_title=match.title,
+        source_author=match.channel,
+        confidence=match.confidence,
+        selection_method="auto",
+    )
+
+
+def source_row_for_track(db: SongPullHobbyDB, playlist: str, track: str):
+    playlist_id = resolve_saved_playlist(db, playlist)
+    track_row = resolve_saved_track(db, playlist_id, track)
+    row = db.playlist_track_with_source(playlist_id, track_row["spotify_track_id"])
+    if not row:
+        fail(
+            "No saved source link found for that track. Run `songpull-hobby sync` "
+            "or `songpull-hobby set-source` first."
+        )
+    return row
+
+
+def print_source_row(row) -> None:
+    table = Table(title=f"{row['playlist_name']} / {row['position']}. {row['name']}")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("Track", row["name"])
+    table.add_row("Artists", row["artists"])
+    table.add_row("Provider", row["provider"] or "")
+    table.add_row("Link", row["source_url"] or "")
+    table.add_row("Match", row["source_title"] or "")
+    table.add_row("Author", row["source_author"] or "")
+    table.add_row("Score", format_score(row["confidence"]))
+    table.add_row("Method", row["selection_method"] or "")
+    console.print(table)
+
+
+def manual_match_record(row) -> dict[str, object]:
+    return {
+        "playlist_name": row["playlist_name"],
+        "playlist_id": row["playlist_id"],
+        "position": row["position"],
+        "spotify_track_id": row["spotify_track_id"],
+        "spotify_track_name": row["spotify_track_name"],
+        "spotify_artists": row["spotify_artists"],
+        "spotify_album": row["spotify_album"],
+        "spotify_duration_ms": row["spotify_duration_ms"],
+        "provider": row["provider"],
+        "source_url": row["source_url"],
+        "source_id": row["source_id"],
+        "source_title": row["source_title"],
+        "source_author": row["source_author"],
+        "source_confidence": row["source_confidence"],
+        "selected_at": row["selected_at"],
+        "selection_method": row["selection_method"],
+    }
 
 
 @app.command()
@@ -110,12 +206,14 @@ def sync(
                     spotify_track_id=row["spotify_track_id"],
                     name=row["name"],
                     artists=row["artists"],
+                    duration_ms=row["duration_ms"],
                 )
             except YouTubeError as exc:
                 fail(str(exc))
 
             if match:
                 db.save_match(match)
+                db.save_source(source_from_match(playlist_id, match))
                 links_added += 1
     else:
         console.print(
@@ -257,19 +355,120 @@ def show(
     table.add_column("#", justify="right")
     table.add_column("Song")
     table.add_column("Artist")
-    table.add_column("YouTube Link")
-    table.add_column("Match")
+    table.add_column("Link")
+    table.add_column("Source Title")
+    table.add_column("Score", justify="right")
+    table.add_column("Method")
 
     for row in rows:
         table.add_row(
             str(row["position"]),
             row["name"],
             row["artists"],
-            row["youtube_url"] or "[yellow]missing[/yellow]",
-            row["youtube_title"] or "",
+            row["source_url"] or "[yellow]missing[/yellow]",
+            row["source_title"] or "",
+            format_score(row["confidence"]),
+            row["selection_method"] or "",
         )
 
     console.print(table)
+
+
+@app.command("set-source")
+def set_source(
+    playlist: str = typer.Argument(..., help="Playlist name or Spotify playlist ID."),
+    track: str = typer.Argument(
+        ..., help="Track position, Spotify track ID, or unique exact track name."
+    ),
+    link: str = typer.Argument(..., help="YouTube link to use for this playlist track."),
+) -> None:
+    """Manually replace the source link for one saved playlist track."""
+    db = database()
+    playlist_id = resolve_saved_playlist(db, playlist)
+    track_row = resolve_saved_track(db, playlist_id, track)
+
+    try:
+        validated = require_youtube_client().source_from_url(link)
+    except YouTubeError as exc:
+        fail(str(exc))
+
+    source = Source(
+        playlist_id=playlist_id,
+        spotify_track_id=track_row["spotify_track_id"],
+        provider=validated.provider,
+        source_url=validated.source_url,
+        source_id=validated.source_id,
+        source_title=validated.source_title,
+        source_author=validated.source_author,
+        confidence=validated.confidence,
+        selection_method=validated.selection_method,
+    )
+    db.save_source(source, overwrite_manual=True)
+    console.print(
+        f"[green]Updated source for {track_row['name']}:[/green] "
+        f"{source.source_title}"
+    )
+
+
+@app.command("get-link")
+def get_link(
+    playlist: str = typer.Argument(..., help="Playlist name or Spotify playlist ID."),
+    track: str = typer.Argument(
+        ..., help="Track position, Spotify track ID, or unique exact track name."
+    ),
+) -> None:
+    """Show the saved link and match score for one playlist track."""
+    print_source_row(source_row_for_track(database(), playlist, track))
+
+
+@app.command("export-manual-matches")
+def export_manual_matches(
+    output: Path = typer.Argument(..., help="JSONL or CSV path to write."),
+    playlist: Optional[str] = typer.Option(
+        None, help="Optional playlist name or Spotify playlist ID."
+    ),
+    output_format: str = typer.Option(
+        "jsonl", "--format", help="Export format: jsonl or csv."
+    ),
+) -> None:
+    """Export manually selected source matches for analysis."""
+    normalized_format = output_format.lower()
+    if normalized_format not in {"jsonl", "csv"}:
+        fail("Export format must be `jsonl` or `csv`.")
+
+    rows = database().manual_source_rows(playlist)
+    records = [manual_match_record(row) for row in rows]
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    if normalized_format == "jsonl":
+        with output.open("w") as file:
+            for record in records:
+                file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    else:
+        fieldnames = [
+            "playlist_name",
+            "playlist_id",
+            "position",
+            "spotify_track_id",
+            "spotify_track_name",
+            "spotify_artists",
+            "spotify_album",
+            "spotify_duration_ms",
+            "provider",
+            "source_url",
+            "source_id",
+            "source_title",
+            "source_author",
+            "source_confidence",
+            "selected_at",
+            "selection_method",
+        ]
+        with output.open("w", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(records)
+
+    console.print(f"[green]Exported {len(records)} manual matches to {output}.[/green]")
 
 
 @app.command()
@@ -286,7 +485,18 @@ def export(
     with output.open("w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(
-            ["playlist", "position", "song", "artists", "youtube_url", "match_title"]
+            [
+                "playlist",
+                "position",
+                "song",
+                "artists",
+                "source_provider",
+                "source_url",
+                "source_title",
+                "source_author",
+                "confidence",
+                "selection_method",
+            ]
         )
         for row in rows:
             writer.writerow(
@@ -295,8 +505,12 @@ def export(
                     row["position"],
                     row["name"],
                     row["artists"],
-                    row["youtube_url"] or "",
-                    row["youtube_title"] or "",
+                    row["provider"] or "",
+                    row["source_url"] or "",
+                    row["source_title"] or "",
+                    row["source_author"] or "",
+                    format_score(row["confidence"]),
+                    row["selection_method"] or "",
                 ]
             )
 
