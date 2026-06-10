@@ -51,6 +51,10 @@ songpull-hobby get-playlists --limit 5
 # Syncs the first 10 tracks from an example playlist and searches YouTube links.
 songpull-hobby sync "https://open.spotify.com/playlist/3zO9BEXAMPLE1234567890" --limit 10
 
+# Rerun automatic YouTube matching for one saved track when you want to spend
+# extra quota only on that item.
+songpull-hobby match-track "My top tracks playlist" 12 --youtube-query-variants 4
+
 # Shows the saved local table for that playlist.
 songpull-hobby show "https://open.spotify.com/playlist/3zO9BEXAMPLE1234567890"
 
@@ -151,6 +155,16 @@ songpull-hobby sync "My top tracks playlist" --limit 10
 Synced 10 tracks from My top tracks playlist. Added 10 YouTube links.
 ```
 
+Sync starts with one YouTube search query per track to conserve the daily
+YouTube Data API quota. If that first query has no confident match, SongPullHobby
+can automatically spend a few extra query variants as a fallback. Set
+`--youtube-query-variants 1` for strict quota mode, or raise the value when you
+want broader matching recall:
+
+```bash
+songpull-hobby sync "My top tracks playlist" --youtube-query-variants 4
+```
+
 `show` prints the saved local library table:
 
 ```bash
@@ -186,6 +200,9 @@ songpull-hobby sync "https://open.spotify.com/playlist/PLAYLIST_ID" --limit 10
 
 # Force YouTube links to be searched again for saved tracks.
 songpull-hobby sync "https://open.spotify.com/playlist/PLAYLIST_ID" --refresh-youtube
+
+# Automatically search YouTube again for one saved playlist track.
+songpull-hobby match-track "My top tracks playlist" 12 --youtube-query-variants 4
 
 # Show saved tracks and links.
 songpull-hobby show "https://open.spotify.com/playlist/PLAYLIST_ID"
@@ -230,13 +247,16 @@ and [YouTube API Services Terms](https://developers.google.com/youtube/terms/api
 - `YOUTUBE_API_KEY is not set`: Spotify sync still works, but YouTube matching is
   skipped until you add a YouTube Data API key to `.env`.
 - YouTube quota or API errors: check that the YouTube Data API v3 is enabled for
-  the Google Cloud project attached to your API key.
+  the Google Cloud project attached to your API key. If quota is exhausted,
+  SongPullHobby stops matching early and keeps the Spotify playlist metadata
+  synced.
 
 ## Compliance Notes
 
 - Spotify API access is free for this personal metadata use case.
 - YouTube API search calls consume quota, so SongPullHobby avoids repeated
-  searches by reusing saved reference links.
+  searches by reusing saved reference links. `sync` starts with one search query
+  and only spends extra variants as a fallback for weak or missing matches.
 - Do not use SongPullHobby to download, copy, or store Spotify or YouTube audio
   or video content.
 - Review and follow the [Spotify Developer Terms](https://developer.spotify.com/terms/),

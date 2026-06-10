@@ -2,11 +2,14 @@ import csv
 import json
 
 from songpull_hobby import cli
-from songpull_hobby.db import Source
+from songpull_hobby.db import Match, Source
 
 
 class FakeDB:
-    saved_source = None
+    def __init__(self):
+        self.saved_match = None
+        self.saved_source = None
+        self.last_overwrite_manual = None
 
     def playlist_rows(self, playlist):
         assert playlist == "My Playlist"
@@ -67,10 +70,37 @@ class FakeDB:
     def resolve_playlist_track(self, playlist_id, track):
         assert playlist_id == "playlist-1"
         assert track == "1"
-        return {"spotify_track_id": "track-1", "name": "Song One"}
+        return {
+            "spotify_track_id": "track-1",
+            "name": "Song One",
+            "artists": "Artist One",
+            "duration_ms": 225000,
+            "position": 1,
+        }
+
+    def playlist_track_with_source(self, playlist_id, spotify_track_id):
+        assert playlist_id == "playlist-1"
+        assert spotify_track_id == "track-1"
+        if not self.saved_source:
+            return None
+        return {
+            "playlist_name": "My Playlist",
+            "position": 1,
+            "name": "Song One",
+            "artists": "Artist One",
+            "provider": self.saved_source.provider,
+            "source_url": self.saved_source.source_url,
+            "source_title": self.saved_source.source_title,
+            "source_author": self.saved_source.source_author,
+            "confidence": self.saved_source.confidence,
+            "selection_method": self.saved_source.selection_method,
+        }
+
+    def save_match(self, match):
+        self.saved_match = match
 
     def save_source(self, source, overwrite_manual=False):
-        assert overwrite_manual is True
+        self.last_overwrite_manual = overwrite_manual
         self.saved_source = source
 
 
@@ -150,6 +180,36 @@ def test_set_source_validates_with_youtube_data_api(monkeypatch):
 
     cli.set_source("My Playlist", "1", "https://www.youtube.com/watch?v=abc123")
 
+    assert db.last_overwrite_manual is True
     assert db.saved_source.spotify_track_id == "track-1"
     assert db.saved_source.source_id == "abc123"
     assert db.saved_source.selection_method == "manual"
+
+
+def test_match_track_searches_one_saved_track_with_fallback_variants(monkeypatch):
+    db = FakeDB()
+    captured = {}
+
+    class FakeYouTube:
+        def find_best_match(self, **kwargs):
+            captured.update(kwargs)
+            return Match(
+                spotify_track_id=kwargs["spotify_track_id"],
+                youtube_url="https://www.youtube.com/watch?v=abc123",
+                youtube_video_id="abc123",
+                title="Song One - Artist One",
+                channel="Artist One - Topic",
+                confidence=0.9,
+            )
+
+    monkeypatch.setattr(cli, "database", lambda: db)
+    monkeypatch.setattr(cli, "require_youtube_client", lambda: FakeYouTube())
+
+    cli.match_track("My Playlist", "1", youtube_query_variants=4)
+
+    assert captured["spotify_track_id"] == "track-1"
+    assert captured["max_query_variants"] == 1
+    assert captured["fallback_query_variants"] == 4
+    assert db.saved_match.youtube_video_id == "abc123"
+    assert db.saved_source.source_title == "Song One - Artist One"
+    assert db.saved_source.selection_method == "auto"

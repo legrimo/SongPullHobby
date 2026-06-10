@@ -12,7 +12,7 @@ from rich.table import Table
 from songpull_hobby.config import ensure_data_dir, load_settings
 from songpull_hobby.db import SongPullHobbyDB, Source
 from songpull_hobby.spotify import SpotifyClient, SpotifyError, extract_playlist_id
-from songpull_hobby.youtube import YouTubeClient, YouTubeError
+from songpull_hobby.youtube import YouTubeClient, YouTubeError, YouTubeQuotaExceededError
 
 
 app = typer.Typer(help="Sync Spotify playlists and save matching YouTube links.")
@@ -103,6 +103,30 @@ def source_from_match(playlist_id: str, match) -> Source:
     )
 
 
+def save_youtube_match_for_track(
+    db: SongPullHobbyDB,
+    youtube: YouTubeClient,
+    playlist_id: str,
+    row,
+    youtube_query_variants: int,
+    overwrite_manual: bool = False,
+) -> bool:
+    match = youtube.find_best_match(
+        spotify_track_id=row["spotify_track_id"],
+        name=row["name"],
+        artists=row["artists"],
+        duration_ms=row["duration_ms"],
+        max_query_variants=1,
+        fallback_query_variants=youtube_query_variants,
+    )
+    if not match:
+        return False
+
+    db.save_match(match)
+    db.save_source(source_from_match(playlist_id, match), overwrite_manual=overwrite_manual)
+    return True
+
+
 def source_row_for_track(db: SongPullHobbyDB, playlist: str, track: str):
     playlist_id = resolve_saved_playlist(db, playlist)
     track_row = resolve_saved_track(db, playlist_id, track)
@@ -170,6 +194,15 @@ def sync(
     refresh_youtube: bool = typer.Option(
         False, help="Search YouTube again even when a saved link exists."
     ),
+    youtube_query_variants: int = typer.Option(
+        4,
+        min=1,
+        help=(
+            "Maximum YouTube search query variants to try per track. Sync starts "
+            "with one quota-conscious query and spends extra variants only as a "
+            "fallback for no or weak matches."
+        ),
+    ),
 ) -> None:
     """Fetch playlist tracks and fill in missing YouTube links."""
     db = database()
@@ -199,21 +232,25 @@ def sync(
 
     youtube = youtube_client()
     links_added = 0
+    youtube_quota_exhausted = False
     if youtube:
         for row in db.tracks_needing_youtube(playlist_id, refresh=refresh_youtube):
             try:
-                match = youtube.find_best_match(
-                    spotify_track_id=row["spotify_track_id"],
-                    name=row["name"],
-                    artists=row["artists"],
-                    duration_ms=row["duration_ms"],
+                matched = save_youtube_match_for_track(
+                    db,
+                    youtube,
+                    playlist_id,
+                    row,
+                    youtube_query_variants=youtube_query_variants,
                 )
+            except YouTubeQuotaExceededError as exc:
+                console.print(f"[yellow]{exc}[/yellow]")
+                youtube_quota_exhausted = True
+                break
             except YouTubeError as exc:
                 fail(str(exc))
 
-            if match:
-                db.save_match(match)
-                db.save_source(source_from_match(playlist_id, match))
+            if matched:
                 links_added += 1
     else:
         console.print(
@@ -225,6 +262,11 @@ def sync(
         f"[green]Synced {track_count} tracks from {playlist_payload['name']}."
         f" Added {links_added} YouTube links.[/green]"
     )
+    if youtube_quota_exhausted:
+        console.print(
+            "[yellow]YouTube matching stopped early because the API quota was "
+            "exhausted.[/yellow]"
+        )
 
 
 @app.command("debug-spotify")
@@ -408,6 +450,55 @@ def set_source(
         f"[green]Updated source for {track_row['name']}:[/green] "
         f"{source.source_title}"
     )
+
+
+@app.command("match-track")
+def match_track(
+    playlist: str = typer.Argument(..., help="Playlist name or Spotify playlist ID."),
+    track: str = typer.Argument(
+        ..., help="Track position, Spotify track ID, or unique exact track name."
+    ),
+    youtube_query_variants: int = typer.Option(
+        4,
+        min=1,
+        help="Maximum YouTube search query variants to try for this track.",
+    ),
+    overwrite_manual: bool = typer.Option(
+        False, help="Replace an existing manual source override."
+    ),
+) -> None:
+    """Search YouTube again for one saved playlist track."""
+    youtube = require_youtube_client()
+    db = database()
+    playlist_id = resolve_saved_playlist(db, playlist)
+    track_row = resolve_saved_track(db, playlist_id, track)
+    existing = db.playlist_track_with_source(playlist_id, track_row["spotify_track_id"])
+    if (
+        existing
+        and existing["selection_method"] == "manual"
+        and not overwrite_manual
+    ):
+        fail("Track has a manual source. Pass `--overwrite-manual` to replace it.")
+
+    try:
+        matched = save_youtube_match_for_track(
+            db,
+            youtube,
+            playlist_id,
+            track_row,
+            youtube_query_variants=youtube_query_variants,
+            overwrite_manual=overwrite_manual,
+        )
+    except YouTubeError as exc:
+        fail(str(exc))
+
+    if not matched:
+        fail("No confident YouTube match found for that track.")
+
+    row = db.playlist_track_with_source(playlist_id, track_row["spotify_track_id"])
+    console.print(f"[green]Matched source for {track_row['name']}.[/green]")
+    if row:
+        print_source_row(row)
 
 
 @app.command("get-link")

@@ -1,6 +1,7 @@
 from songpull_hobby.youtube import (
     YouTubeClient,
     YouTubeCandidate,
+    YouTubeQuotaExceededError,
     base_title,
     candidate_from_item,
     extract_video_id,
@@ -101,6 +102,53 @@ def test_search_candidates_dedupes_results_across_queries(monkeypatch):
     assert all(max_results == 25 for _, max_results in calls)
 
 
+def test_search_candidates_can_limit_query_variants(monkeypatch):
+    client = YouTubeClient("key", delay_seconds=0)
+    calls = []
+
+    def fake_search(query, max_results=25):
+        calls.append((query, max_results))
+        return [YouTubeCandidate(query, query, "Channel")]
+
+    monkeypatch.setattr(client, "search", fake_search)
+
+    candidates = client.search_candidates(
+        "Song Title", "Artist One", max_query_variants=1
+    )
+
+    assert len(candidates) == 1
+    assert calls == [("Song Title Artist One official audio", 25)]
+
+
+def test_search_raises_quota_error_for_resource_exhausted_response(monkeypatch):
+    class Response:
+        ok = False
+        status_code = 429
+        text = """
+        {
+          "error": {
+            "status": "RESOURCE_EXHAUSTED",
+            "errors": [{"reason": "rateLimitExceeded"}]
+          }
+        }
+        """
+
+        def json(self):
+            raise ValueError("no json")
+
+    monkeypatch.setattr(
+        "songpull_hobby.youtube.requests.get", lambda url, params, timeout: Response()
+    )
+    client = YouTubeClient("key", delay_seconds=0)
+
+    try:
+        client.search("query")
+    except YouTubeQuotaExceededError as exc:
+        assert "quota exceeded" in str(exc).lower()
+    else:
+        raise AssertionError("expected quota error")
+
+
 def test_score_candidate_rewards_duration_and_popularity():
     candidate = YouTubeCandidate(
         video_id="abc123",
@@ -182,7 +230,7 @@ def test_find_best_match_uses_detailed_candidate_scores(monkeypatch):
     monkeypatch.setattr(
         client,
         "search_candidates",
-        lambda name, artists: [
+        lambda name, artists, **kwargs: [
             YouTubeCandidate(
                 video_id="abc123_DEF0",
                 title="Artist Name - Song Title Official Audio",
@@ -198,6 +246,44 @@ def test_find_best_match_uses_detailed_candidate_scores(monkeypatch):
     assert match is not None
     assert match.youtube_video_id == "abc123_DEF0"
     assert match.confidence == 1.2
+
+
+def test_find_best_match_uses_fallback_variants_after_weak_first_query(monkeypatch):
+    client = YouTubeClient("key", delay_seconds=0)
+    calls = []
+
+    def fake_search(query, max_results=25):
+        calls.append(query)
+        if query == "Artist Name Song Title":
+            return [
+                YouTubeCandidate(
+                    "strong",
+                    "Artist Name - Song Title Official Audio",
+                    "Artist Name",
+                    duration_seconds=225,
+                    view_count=150_000,
+                )
+            ]
+        return [YouTubeCandidate("weak", "Unrelated", "Channel")]
+
+    monkeypatch.setattr(client, "search", fake_search)
+
+    match = client.find_best_match(
+        "track-1",
+        "Song Title",
+        "Artist Name",
+        225_000,
+        max_query_variants=1,
+        fallback_query_variants=3,
+    )
+
+    assert match is not None
+    assert match.youtube_video_id == "strong"
+    assert calls == [
+        "Song Title Artist Name official audio",
+        "Song Title Artist Name",
+        "Artist Name Song Title",
+    ]
 
 
 def test_find_best_match_scores_candidates_from_all_query_variants(monkeypatch):

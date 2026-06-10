@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 import urllib.parse
@@ -42,6 +43,10 @@ class YouTubeError(RuntimeError):
     pass
 
 
+class YouTubeQuotaExceededError(YouTubeError):
+    pass
+
+
 @dataclass(frozen=True)
 class YouTubeCandidate:
     video_id: str
@@ -73,27 +78,38 @@ class YouTubeClient:
         artists: str,
         duration_ms: Optional[int] = None,
         min_confidence: float = 0.35,
+        max_query_variants: Optional[int] = None,
+        fallback_query_variants: Optional[int] = None,
     ) -> Optional[Match]:
-        candidates = self.search_candidates(name, artists)
-        if not candidates:
-            return None
+        candidates = self.search_candidates(
+            name, artists, max_query_variants=max_query_variants
+        )
+        match = best_match(
+            spotify_track_id, candidates, name, artists, duration_ms, min_confidence
+        )
+        if match or fallback_query_variants is None:
+            return match
 
-        scored = [
-            (score_candidate_details(candidate, name, artists, duration_ms), candidate)
-            for candidate in candidates
-        ]
-        scored.sort(key=lambda item: item[0].score, reverse=True)
-        candidate_score, candidate = scored[0]
-        if candidate_score.score < min_confidence:
-            return None
+        searched_variants = max_query_variants or len(search_queries(name, artists))
+        extra_variants = fallback_query_variants - searched_variants
+        if extra_variants <= 0:
+            return match
 
-        return Match(
-            spotify_track_id=spotify_track_id,
-            youtube_url=candidate.url,
-            youtube_video_id=candidate.video_id,
-            title=candidate.title,
-            channel=candidate.channel,
-            confidence=candidate_score.score,
+        candidates_by_id = {candidate.video_id: candidate for candidate in candidates}
+        for candidate in self.search_candidates(
+            name,
+            artists,
+            max_query_variants=extra_variants,
+            query_offset=searched_variants,
+        ):
+            candidates_by_id.setdefault(candidate.video_id, candidate)
+        return best_match(
+            spotify_track_id,
+            list(candidates_by_id.values()),
+            name,
+            artists,
+            duration_ms,
+            min_confidence,
         )
 
     def source_from_url(self, link: str) -> Source:
@@ -117,10 +133,18 @@ class YouTubeClient:
         )
 
     def search_candidates(
-        self, name: str, artists: str, max_results: int = DEFAULT_SEARCH_MAX_RESULTS
+        self,
+        name: str,
+        artists: str,
+        max_results: int = DEFAULT_SEARCH_MAX_RESULTS,
+        max_query_variants: Optional[int] = None,
+        query_offset: int = 0,
     ) -> List[YouTubeCandidate]:
         candidates_by_id: Dict[str, YouTubeCandidate] = {}
-        for query in search_queries(name, artists):
+        queries = search_queries(name, artists)[max(0, query_offset) :]
+        if max_query_variants is not None:
+            queries = queries[: max(0, max_query_variants)]
+        for query in queries:
             for candidate in self.search(query, max_results=max_results):
                 candidates_by_id.setdefault(candidate.video_id, candidate)
         return list(candidates_by_id.values())
@@ -143,7 +167,7 @@ class YouTubeClient:
         if self.delay_seconds:
             time.sleep(self.delay_seconds)
         if not response.ok:
-            raise YouTubeError(f"YouTube search failed: {response.text}")
+            raise youtube_api_error("search", response)
 
         candidates = [
             candidate_from_item(item) for item in response.json().get("items", [])
@@ -168,7 +192,7 @@ class YouTubeClient:
         if self.delay_seconds:
             time.sleep(self.delay_seconds)
         if not response.ok:
-            raise YouTubeError(f"YouTube video details failed: {response.text}")
+            raise youtube_api_error("video details", response)
 
         details = {
             item["id"]: item
@@ -194,12 +218,84 @@ class YouTubeClient:
         return enriched
 
 
+def best_match(
+    spotify_track_id: str,
+    candidates: List[YouTubeCandidate],
+    name: str,
+    artists: str,
+    duration_ms: Optional[int],
+    min_confidence: float,
+) -> Optional[Match]:
+    if not candidates:
+        return None
+
+    scored = [
+        (score_candidate_details(candidate, name, artists, duration_ms), candidate)
+        for candidate in candidates
+    ]
+    scored.sort(key=lambda item: item[0].score, reverse=True)
+    candidate_score, candidate = scored[0]
+    if candidate_score.score < min_confidence:
+        return None
+
+    return Match(
+        spotify_track_id=spotify_track_id,
+        youtube_url=candidate.url,
+        youtube_video_id=candidate.video_id,
+        title=candidate.title,
+        channel=candidate.channel,
+        confidence=candidate_score.score,
+    )
+
+
 def candidate_from_item(item: Dict[str, Any]) -> YouTubeCandidate:
     snippet = item.get("snippet", {})
     return YouTubeCandidate(
         video_id=item["id"]["videoId"],
         title=snippet.get("title", ""),
         channel=snippet.get("channelTitle"),
+    )
+
+
+def youtube_api_error(action: str, response: requests.Response) -> YouTubeError:
+    payload = response_payload(response)
+    if is_quota_exceeded(response, payload):
+        return YouTubeQuotaExceededError(
+            "YouTube API quota exceeded. Wait for the daily quota reset, request a "
+            "higher YouTube Data API quota, or rerun sync with cached/manual source "
+            "links before searching more tracks."
+        )
+
+    return YouTubeError(f"YouTube {action} failed: {response.text}")
+
+
+def response_payload(response: requests.Response) -> Dict[str, Any]:
+    try:
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError, AttributeError):
+        try:
+            payload = json.loads(response.text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def is_quota_exceeded(response: requests.Response, payload: Dict[str, Any]) -> bool:
+    if getattr(response, "status_code", None) == 429:
+        return True
+
+    error = payload.get("error") or {}
+    if error.get("status") == "RESOURCE_EXHAUSTED":
+        return True
+
+    errors = error.get("errors") or []
+    if any(error_item.get("reason") == "rateLimitExceeded" for error_item in errors):
+        return True
+
+    details = error.get("details") or []
+    return any(
+        detail.get("reason") in {"RATE_LIMIT_EXCEEDED", "QUOTA_EXCEEDED"}
+        for detail in details
     )
 
 
